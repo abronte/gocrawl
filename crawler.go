@@ -2,6 +2,9 @@
 package gocrawl
 
 import (
+	"fmt"
+	"github.com/garyburd/redigo/redis"
+	"github.com/satori/go.uuid"
 	"reflect"
 	"strings"
 	"sync"
@@ -31,9 +34,12 @@ type Crawler struct {
 
 	// keep lookups in maps, O(1) access time vs O(n) for slice. The empty struct value
 	// is of no use, but this is the smallest type possible - it uses no memory at all.
-	visited map[string]struct{}
+	// visited map[string]struct{}
 	hosts   map[string]struct{}
 	workers map[string]*worker
+
+	db          redis.Conn
+	dbNamespace string
 }
 
 // Crawler constructor with a pre-initialized Options object.
@@ -88,8 +94,11 @@ func (this *Crawler) init(ctxs []*URLContext) {
 	// Create a shiny new WaitGroup
 	this.wg = new(sync.WaitGroup)
 
+	this.db, _ = redis.Dial("tcp", ":6379")
+	this.dbNamespace = uuid.NewV4().String()
+
 	// Initialize the visits fields
-	this.visited = make(map[string]struct{}, l)
+	// this.visited = make(map[string]struct{}, l)
 	this.pushPopRefCount, this.visits = 0, 0
 
 	// Create the workers map and the push channel (the channel used by workers
@@ -199,8 +208,10 @@ func (this *Crawler) enqueueUrls(ctxs []*URLContext) (cnt int) {
 		if ctx.IsRobotsURL() {
 			continue
 		}
-		// Check if it has been visited before, using the normalized URL
-		_, isVisited = this.visited[ctx.normalizedURL.String()]
+		// // Check if it has been visited before, using the normalized URL
+		isVisited, _ = redis.Bool(this.db.Do("EXISTS", fmt.Sprint(this.dbNamespace, ":", ctx.normalizedURL.String())))
+
+		// _, isVisited = this.visited[ctx.normalizedURL.String()]
 
 		// Filter the URL
 		if enqueue = this.Options.Extender.Filter(ctx, isVisited); !enqueue {
@@ -258,8 +269,8 @@ func (this *Crawler) enqueueUrls(ctxs []*URLContext) (cnt int) {
 			// (unless denied by robots.txt, but this is out of our hands, for all we
 			// care, it is visited).
 			if !isVisited {
-				// The visited map works with the normalized URL
-				this.visited[ctx.normalizedURL.String()] = struct{}{}
+				//create a key with the normalized url, expires in 3 days
+				this.db.Do("SETEX", fmt.Sprint(this.dbNamespace, ":", ctx.normalizedURL.String()), 259200, "1")
 			}
 		}
 	}
